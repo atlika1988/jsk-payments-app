@@ -3,7 +3,6 @@ import pandas as pd
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from io import BytesIO
-
 from payments_import import (
     import_statement,
     save_payments_to_db,
@@ -13,7 +12,7 @@ from payments_import import (
 
 
 # ======================================================
-# НАСТРОЙКА БАЗЫ
+# БАЗА ДАННЫХ
 # ======================================================
 
 DATABASE_URL = "sqlite:///jsk.db"
@@ -78,6 +77,7 @@ if uploaded:
     cols[3].markdown("**Авто**")
     cols[4].markdown("**Квартира**")
 
+    # строки таблицы
     for idx, p in enumerate(unmatched):
         row = st.columns([1, 1, 3, 1, 1])
 
@@ -105,21 +105,76 @@ if uploaded:
 
         save_payments_to_db(session, final_matched, final_unmatched)
 
-        st.success("Платежи успешно сохранены в базу!")
+        st.success("Платежи успешно сохранены!")
 
     # ======================================================
-    # КНОПКА СКАЧАТЬ ОТЧЁТ
+    # ОТЧЁТ EXCEL — автофильтры, стиль, заморозка
     # ======================================================
+
+    def autofit_columns(worksheet, dataframe):
+        """Автоматически подгоняет ширину колонок под содержимое."""
+        for i, col in enumerate(dataframe.columns):
+            maxlen = max(
+                [len(str(col))] + [len(str(v)) for v in dataframe[col].values]
+            )
+            worksheet.column_dimensions[worksheet.cell(row=1, column=i + 1).column_letter].width = maxlen + 2
 
     def create_report():
-        """Создаёт Excel-файл с результатами распознавания."""
+        """Создаёт Excel-файл с оформлением."""
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, Alignment, PatternFill
+        from openpyxl.worksheet.table import Table, TableStyleInfo
+
         output = BytesIO()
-        writer = pd.ExcelWriter(output, engine="xlsxwriter")
+        wb = Workbook()
 
-        payments_to_dataframe(matched).to_excel(writer, index=False, sheet_name="Распознанные")
-        payments_to_dataframe(unmatched).to_excel(writer, index=False, sheet_name="Нераспознанные")
+        # --------------- Лист 1: Распознанные ----------------
+        ws1 = wb.active
+        ws1.title = "Распознанные"
 
-        writer.close()
+        df1 = payments_to_dataframe(matched)
+
+        # Загружаем данные
+        for r_idx, row in enumerate(df1.values, start=2):
+            for c_idx, val in enumerate(row, start=1):
+                ws1.cell(row=r_idx, column=c_idx, value=val)
+
+        # Заголовки
+        for c_idx, col_name in enumerate(df1.columns, start=1):
+            cell = ws1.cell(row=1, column=c_idx, value=col_name)
+            cell.font = Font(bold=True)
+            cell.fill = PatternFill(start_color="DDEEFF", fill_type="solid")
+            cell.alignment = Alignment(horizontal="center")
+
+        # автофильтр
+        ws1.auto_filter.ref = ws1.dimensions
+
+        # заморозка верхней строки
+        ws1.freeze_panes = "A2"
+
+        autofit_columns(ws1, df1)
+
+        # --------------- Лист 2: Нераспознанные ----------------
+        ws2 = wb.create_sheet("Нераспознанные")
+
+        df2 = payments_to_dataframe(unmatched)
+
+        for r_idx, row in enumerate(df2.values, start=2):
+            for c_idx, val in enumerate(row, start=1):
+                ws2.cell(row=r_idx, column=c_idx, value=val)
+
+        for c_idx, col_name in enumerate(df2.columns, start=1):
+            cell = ws2.cell(row=1, column=c_idx, value=col_name)
+            cell.font = Font(bold=True)
+            cell.fill = PatternFill(start_color="FFEEDD", fill_type="solid")
+            cell.alignment = Alignment(horizontal="center")
+
+        ws2.auto_filter.ref = ws2.dimensions
+        ws2.freeze_panes = "A2"
+
+        autofit_columns(ws2, df2)
+
+        wb.save(output)
         output.seek(0)
         return output
 
