@@ -64,21 +64,36 @@ if uploaded:
     st.subheader("2. Автоматически распознанные платежи")
     st.dataframe(payments_to_dataframe(matched), use_container_width=True)
 
-    st.subheader("3. Платежи, требующие ручного сопоставления")
+   st.subheader("3. Платежи, требующие ручного сопоставления")
 
-    for i, p in enumerate(unmatched):
-        with st.expander(f"Платеж №{i+1} — {p.amount} ₽, {p.date.date()}"):
-            st.write(f"**Описание:** {p.description}")
-            st.write(f"**Отправитель:** {p.sender_info}")
-            st.write(f"**Автоопределение:** {p.guessed_apartment_number}")
+# Заголовок таблицы
+cols = st.columns([1, 1, 3, 1, 1])
 
-            choice = st.selectbox(
-                "Выберите квартиру:",
-                ["Не выбрано"] + list(apt_map.keys()),
-                key=f"apt_sel_{i}"
-            )
-            if choice != "Не выбрано":
-                p.apartment_id = apt_map[choice]
+cols[0].markdown("**Дата**")
+cols[1].markdown("**Сумма**")
+cols[2].markdown("**Описание**")
+cols[3].markdown("**Авто**")
+cols[4].markdown("**Квартира**")
+
+selection = {}  # здесь будем хранить выборы пользователя
+
+for idx, p in enumerate(unmatched):
+    row = st.columns([1, 1, 3, 1, 1])
+
+    row[0].write(p.date.strftime("%Y-%m-%d"))
+    row[1].write(float(p.amount))
+    row[2].write(p.description)
+    row[3].write(p.guessed_apartment_number)
+
+    # выпадающий список
+    choice = row[4].selectbox(
+        "",
+        ["Не выбрано"] + list(apt_map.keys()),
+        key=f"apt_choice_{idx}"
+    )
+
+    if choice != "Не выбрано":
+        p.apartment_id = apt_map[choice]
 
     if st.button("📌 Провести платежи"):
         final_matched = matched + [p for p in unmatched if p.apartment_id]
