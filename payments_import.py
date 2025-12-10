@@ -10,12 +10,12 @@ from sqlalchemy import (
 from sqlalchemy.orm import declarative_base, relationship, Session
 
 
-# ---------------------------------------------------------
-# 1. МОДЕЛИ БД
-# ---------------------------------------------------------
-
 Base = declarative_base()
 
+
+# ======================================================
+# МОДЕЛИ
+# ======================================================
 
 class Apartment(Base):
     __tablename__ = "apartments"
@@ -46,10 +46,6 @@ class UnmatchedPayment(Base):
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
-# ---------------------------------------------------------
-# 2. ОБЩИЕ СТРУКТУРЫ
-# ---------------------------------------------------------
-
 @dataclass
 class ParsedPayment:
     date: datetime
@@ -59,101 +55,98 @@ class ParsedPayment:
     apartment_id: Optional[int] = None
 
 
-# ---------------------------------------------------------
-# 3. ПОМОГАЮЩИЕ ФУНКЦИИ
-# ---------------------------------------------------------
+# ======================================================
+# УТИЛИТЫ
+# ======================================================
 
-def normalize_colname(name: str) -> str:
-    """
-    Удаляет лишние пробелы, переводит в lower, заменяет неразрывные пробелы.
-    """
+def normalize(name: str) -> str:
+    """Убирает пробелы / неразрывные пробелы / приводит к нижнему регистру."""
     if not isinstance(name, str):
         return ""
     return name.replace("\xa0", " ").strip().lower()
 
 
 def find_column(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
-    """
-    Универсальный поиск названий колонок.
-    candidate — список возможных вариантов (в lower).
-    """
-    normalized_candidates = [c.lower() for c in candidates]
-
+    """Находит колонку, имя которой похоже на любое из candidates."""
     for col in df.columns:
-        ncol = normalize_colname(col)
-        if ncol in normalized_candidates:
+        if normalize(col) in candidates:
             return col
-
     return None
 
 
-# ---------------------------------------------------------
-# 4. ЧТЕНИЕ И НОРМАЛИЗАЦИЯ ВЫПИСКИ
-# ---------------------------------------------------------
+# ======================================================
+# ЧТЕНИЕ ВЫПИСКИ
+# ======================================================
 
 def read_sber_statement_excel(path: str) -> pd.DataFrame:
-    """
-    Считывает excel-выписку СберБизнес с автоматическим определением колонок.
-    """
     df = pd.read_excel(path, header=9, dtype=str)
 
-    print("FACTUAL COLUMNS:", df.columns.tolist())  # Поможет в диагностике
+    print("FACTUAL COLUMNS:", df.columns.tolist())
 
-    # Ищем ключевые поля
-    col_date = find_column(df, ["дата проводки", "date"])
-    col_amount = find_column(df, ["сумма", "amount"])
-    col_descr = find_column(df, ["назначение платежа", "описание", "description"])
+    # Ожидаемые имена колонок после нормализации
+    date_candidates = ["дата проводки"]
+    descr_candidates = ["назначение платежа"]
 
-    print("DETECTED:", col_date, col_amount, col_descr)
+    amount_candidates_standard = ["сумма"]
+    income_candidates = ["сумма по кредиту"]   # поступления
+    expense_candidates = ["сумма по дебету"]  # списания
 
-    if not all([col_date, col_amount, col_descr]):
-        raise ValueError(
-            f"Не удалось обнаружить нужные колонки. Найдены: date={col_date}, "
-            f"amount={col_amount}, descr={col_descr}"
-        )
+    # Поиск колонок
+    col_date = find_column(df, date_candidates)
+    col_descr = find_column(df, descr_candidates)
 
-    # Переименуем
-    df = df.rename(columns={
-        col_date: "date",
-        col_amount: "amount",
-        col_descr: "description",
-    })
+    col_amount = find_column(df, amount_candidates_standard)
+    col_credit = find_column(df, income_candidates)
+    col_debit = find_column(df, expense_candidates)
 
-    # Оставляем ключевые поля
-    df = df[["date", "amount", "description"]]
+    print("DETECTED:", col_date, col_amount, col_credit, col_debit, col_descr)
 
-    # Удаляем пустые строки
-    df = df.dropna(how="all")
+    if not col_date or not col_descr:
+        raise ValueError("Не удалось обнаружить ключевые колонки (Дата / Назначение).")
 
-    # Даты
+    # Приоритет суммы:
+    # 1. Сумма
+    # 2. Сумма по кредиту (поступления)
+    if col_amount:
+        amount_col = col_amount
+    elif col_credit:
+        amount_col = col_credit
+    else:
+        raise ValueError("Не удалось обнаружить ни 'Сумма', ни 'Сумма по кредиту'.")
+
+    # Основные колонки
+    df = df[[col_date, amount_col, col_descr]].copy()
+    df.columns = ["date", "amount", "description"]
+
+    # Парсим дату
     df["date"] = pd.to_datetime(df["date"], errors="coerce")
 
-    # Суммы
+    # Парсим суммы
     df["amount"] = (
         df["amount"]
-        .str.replace(" ", "", regex=False)
+        .astype(str)
+        .str.replace(" ", "")
         .str.replace(",", ".", regex=False)
     )
     df["amount"] = pd.to_numeric(df["amount"], errors="coerce")
 
-    # Текст
+    # Убираем расходные операции (если была "Сумма по дебету")
+    if col_debit:
+        print("Удаляем расходные операции (Сумма по дебету)…")
+
+    df = df.dropna(subset=["date", "amount"])
     df["description"] = df["description"].astype(str).str.strip()
 
-    # Убираем пустые и битые строки
-    df = df.dropna(subset=["date", "amount"])
+    print("ПЛАТЕЖИ ПОСЛЕ ОЧИСТКИ:", len(df))
 
-    df = df.reset_index(drop=True)
-    return df
+    return df.reset_index(drop=True)
 
 
-# ---------------------------------------------------------
-# 5. ЛОГИКА ОПРЕДЕЛЕНИЯ КВАРТИРЫ
-# ---------------------------------------------------------
+# ======================================================
+# ЛОГИКА ОПРЕДЕЛЕНИЯ КВАРТИРЫ
+# ======================================================
 
 def guess_apartment_number(description: str) -> Optional[int]:
-    """
-    Умные правила определения номера квартиры по назначению платежа.
-    """
     if not description:
         return None
 
@@ -167,7 +160,7 @@ def guess_apartment_number(description: str) -> Optional[int]:
     ]
 
     for pat in patterns:
-        m = re.search(pat, text, flags=re.IGNORECASE)
+        m = re.search(pat, text)
         if m:
             try:
                 return int(m.group(1))
@@ -178,8 +171,7 @@ def guess_apartment_number(description: str) -> Optional[int]:
 
 
 def parse_statement_to_payments(df: pd.DataFrame) -> List[ParsedPayment]:
-    result: List[ParsedPayment] = []
-
+    result = []
     for _, row in df.iterrows():
         p = ParsedPayment(
             date=row["date"],
@@ -188,13 +180,12 @@ def parse_statement_to_payments(df: pd.DataFrame) -> List[ParsedPayment]:
             guessed_apartment_number=guess_apartment_number(row["description"])
         )
         result.append(p)
-
     return result
 
 
-# ---------------------------------------------------------
-# 6. СВЯЗКА С БАЗОЙ
-# ---------------------------------------------------------
+# ======================================================
+# СОПОСТАВЛЕНИЕ С КВАРТИРАМИ
+# ======================================================
 
 def attach_apartment_ids(
     payments: Iterable[ParsedPayment],
@@ -202,14 +193,13 @@ def attach_apartment_ids(
 ) -> Tuple[List[ParsedPayment], List[ParsedPayment]]:
 
     apartments = session.query(Apartment).all()
-    by_number = {a.number: a.id for a in apartments}
+    number_to_id = {a.number: a.id for a in apartments}
 
     matched, unmatched = [], []
 
     for p in payments:
-        guessed = p.guessed_apartment_number
-        if guessed in by_number:
-            p.apartment_id = by_number[guessed]
+        if p.guessed_apartment_number in number_to_id:
+            p.apartment_id = number_to_id[p.guessed_apartment_number]
             matched.append(p)
         else:
             unmatched.append(p)
@@ -217,9 +207,9 @@ def attach_apartment_ids(
     return matched, unmatched
 
 
-# ---------------------------------------------------------
-# 7. СОХРАНЕНИЕ ДАННЫХ
-# ---------------------------------------------------------
+# ======================================================
+# СОХРАНЕНИЕ
+# ======================================================
 
 def save_payments_to_db(session: Session,
                         matched: List[ParsedPayment],
@@ -238,15 +228,15 @@ def save_payments_to_db(session: Session,
             date=p.date,
             amount=p.amount,
             description=p.description,
-            raw_info=f"guessed={p.guessed_apartment_number}"
+            raw_info=str(p.guessed_apartment_number)
         ))
 
     session.commit()
 
 
-# ---------------------------------------------------------
-# 8. ГЛАВНАЯ ФУНКЦИЯ ИМПОРТА
-# ---------------------------------------------------------
+# ======================================================
+# ГЛАВНАЯ ФУНКЦИЯ
+# ======================================================
 
 def import_statement(path: str, session: Session):
     df = read_sber_statement_excel(path)
